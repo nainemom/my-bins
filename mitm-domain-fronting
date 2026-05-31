@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+set -e
+
+# MITM-DomainFronting setup helper (x86_64 only).
+# Based on https://github.com/patterniha/MITM-DomainFronting
+# Runs a local xray instance that intercepts TLS (MITM) and re-sends traffic
+# with domain fronting, then exposes it as a system-wide VPN via tun2socks so
+# no manual proxy configuration is needed.
+
+CONFIG_URL="https://raw.githubusercontent.com/patterniha/MITM-DomainFronting/refs/heads/main/Xray-config/MITM-DomainFronting.json"
+CONFIG_NAME="MITM-DomainFronting.json"
+
+XRAY_BIN="/usr/local/bin/xray"
+TUN2SOCKS_BIN="/usr/local/bin/tun2socks"
+STATE_DIR="/etc/mitm-domain-fronting"
+
+CONFIG_FILE="$STATE_DIR/$CONFIG_NAME"
+GEOIP_FILE="$STATE_DIR/geoip.dat"
+GEOSITE_FILE="$STATE_DIR/geosite.dat"
+CERT_FILE="$STATE_DIR/mycert.crt"
+KEY_FILE="$STATE_DIR/mycert.key"
+CA_TRUST_FILE="/usr/local/share/ca-certificates/mitm-domain-fronting.crt"
+
+# Chrome/Chromium (and other NSS apps) on Linux use their own trust store at
+# ~/.pki/nssdb, not the system one, so the CA must be added there too.
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+NSSDB="$REAL_HOME/.pki/nssdb"
+CERT_NICKNAME="MITM-DomainFronting"
+
+SOCKS_ADDR="127.0.0.1:10808"   # the config's mixed inbound
+
+# VPN networking
+TUN_DEV="mdftun"
+TUN_ADDR4="198.18.0.1/15"
+PHYS_TABLE=200                 # routing table for root's own (bypass) traffic
+RULE_PREF=100
+
+# Runtime state (used by cleanup)
+XRAY_PID=""
+TUN2SOCKS_PID=""
+ROUTES_UP=0
+QUIC_BLOCKED=0
+V6_BLOCKED=0
+CLEANED=0
+
+# cleanup must be a function: it is the trap target and runs on any exit.
+cleanup() {
+  [[ $CLEANED -eq 1 ]] && return
+  CLEANED=1
+  echo
+  echo "[*] Cleaning up..."
+
+  [[ -n "$TUN2SOCKS_PID" ]] && kill "$TUN2SOCKS_PID" 2>/dev/null || true
+  [[ -n "$XRAY_PID" ]] && kill "$XRAY_PID" 2>/dev/null || true
+
+  if [[ $QUIC_BLOCKED -eq 1 ]]; then
+    iptables -D OUTPUT -p udp --dport 443 -m owner ! --uid-owner 0 -j REJECT 2>/dev/null || true
+    ip6tables -D OUTPUT -p udp --dport 443 -m owner ! --uid-owner 0 -j REJECT 2>/dev/null || true
+  fi
+  [[ $V6_BLOCKED -eq 1 ]] && ip6tables -D OUTPUT -d 2000::/3 -m owner ! --uid-owner 0 -j REJECT 2>/dev/null || true
+  if [[ $ROUTES_UP -eq 1 ]]; then
+    ip route del default dev "$TUN_DEV" metric 1 2>/dev/null || true
+    ip rule del pref "$RULE_PREF" 2>/dev/null || true
+    ip route flush table "$PHYS_TABLE" 2>/dev/null || true
+  fi
+  if ip link show "$TUN_DEV" >/dev/null 2>&1; then
+    ip link set dev "$TUN_DEV" down 2>/dev/null || true
+    ip tuntap del mode tun dev "$TUN_DEV" 2>/dev/null || true
+  fi
+
+  if [[ -f "$CA_TRUST_FILE" ]]; then
+    rm -f "$CA_TRUST_FILE"
+    update-ca-certificates >/dev/null 2>&1 || true
+    echo "[+] Removed certificate from system trust store."
+  fi
+  if command -v certutil >/dev/null 2>&1 && [[ -f "$NSSDB/cert9.db" ]]; then
+    runuser -u "$REAL_USER" -- certutil -d "sql:$NSSDB" -D -n "$CERT_NICKNAME" 2>/dev/null \
+      && echo "[+] Removed certificate from Chrome (NSS) trust store." || true
+  fi
+  rm -f "$CERT_FILE" "$KEY_FILE"
+
+  echo "[+] Cleanup done."
+}
+
+if [[ $EUID -ne 0 ]]; then
+  echo "[!] Run as root"
+  exit 1
+fi
+
+# Armed only after the root check so a non-root abort doesn't trigger cleanup.
+trap cleanup EXIT INT TERM
+
+mkdir -p "$STATE_DIR"
+
+# The xray binary and the geo databases all live in the same release zip, so
+# download it once and extract whichever pieces are missing.
+echo "[*] Checking xray and geo data..."
+need_xray=0; [[ -x "$XRAY_BIN" ]] || need_xray=1
+need_geo=0; { [[ -f "$GEOIP_FILE" && -f "$GEOSITE_FILE" ]]; } || need_geo=1
+if [[ $need_xray -eq 1 || $need_geo -eq 1 ]]; then
+  [[ $need_xray -eq 1 ]] && echo "[!] xray not found at $XRAY_BIN." || true
+  # geoip.dat/geosite.dat are required by the config's geosite:/geoip: rules.
+  [[ $need_geo -eq 1 ]] && echo "[!] geo data not found in $STATE_DIR." || true
+  read -rp "[?] Download the latest xray-core release and install the missing files? (Y/n): " ans
+  if [[ "$ans" == n || "$ans" == N ]]; then echo "[!] xray and geo data are required. Aborting."; exit 1; fi
+  tmp="$(mktemp -d)"
+  echo "[*] Downloading xray-core..."
+  wget -qO "$tmp/xray.zip" "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+  if [[ $need_xray -eq 1 ]]; then
+    unzip -o -q "$tmp/xray.zip" xray -d "$tmp"
+    install -m 0755 "$tmp/xray" "$XRAY_BIN"
+    echo "[+] Installed $("$XRAY_BIN" version 2>/dev/null | head -1) to $XRAY_BIN"
+  fi
+  if [[ $need_geo -eq 1 ]]; then
+    unzip -o -q "$tmp/xray.zip" geoip.dat geosite.dat -d "$STATE_DIR"
+    echo "[+] Installed geoip.dat and geosite.dat to $STATE_DIR"
+  fi
+  rm -rf "$tmp"
+else
+  echo "[+] Found $("$XRAY_BIN" version 2>/dev/null | head -1)"
+fi
+
+echo "[*] Checking tun2socks..."
+if [[ ! -x "$TUN2SOCKS_BIN" ]]; then
+  echo "[!] tun2socks not found at $TUN2SOCKS_BIN."
+  read -rp "[?] Download tun2socks and install it to $TUN2SOCKS_BIN? (Y/n): " ans
+  if [[ "$ans" == n || "$ans" == N ]]; then echo "[!] tun2socks is required for VPN mode. Aborting."; exit 1; fi
+  tmp="$(mktemp -d)"
+  echo "[*] Downloading tun2socks..."
+  wget -qO "$tmp/t2s.zip" "https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-linux-amd64.zip"
+  unzip -o -q "$tmp/t2s.zip" tun2socks-linux-amd64 -d "$tmp"
+  install -m 0755 "$tmp/tun2socks-linux-amd64" "$TUN2SOCKS_BIN"
+  rm -rf "$tmp"
+  echo "[+] Installed tun2socks to $TUN2SOCKS_BIN"
+else
+  echo "[+] Found tun2socks."
+fi
+
+echo "[*] Checking certutil (libnss3-tools)..."
+if ! command -v certutil >/dev/null 2>&1; then
+  echo "[!] certutil not found — needed to trust the CA in Chrome/Chromium."
+  read -rp "[?] Install libnss3-tools via apt? (Y/n): " ans
+  if [[ "$ans" != n && "$ans" != N ]]; then
+    apt-get update
+    apt-get install -y libnss3-tools
+  else
+    echo "[!] Without it, Chrome will reject the certificate. Continuing anyway."
+  fi
+fi
+
+# Generate a fresh CA each run (removed again on cleanup). Mirrors the upstream
+# certificate_generator: `xray tls cert -ca -file=mycert`.
+echo "[*] Generating certificate..."
+( cd "$STATE_DIR" && "$XRAY_BIN" tls cert -ca -file=mycert )
+echo "[+] Wrote $CERT_FILE and $KEY_FILE"
+
+echo "[*] Installing certificate into the trust stores (system + Chrome)..."
+cp "$CERT_FILE" "$CA_TRUST_FILE"
+update-ca-certificates
+echo "[+] Certificate installed in the system trust store."
+if command -v certutil >/dev/null 2>&1; then
+  runuser -u "$REAL_USER" -- mkdir -p "$NSSDB"
+  [[ -f "$NSSDB/cert9.db" ]] || runuser -u "$REAL_USER" -- certutil -d "sql:$NSSDB" -N --empty-password
+  runuser -u "$REAL_USER" -- certutil -d "sql:$NSSDB" -D -n "$CERT_NICKNAME" 2>/dev/null || true
+  runuser -u "$REAL_USER" -- certutil -d "sql:$NSSDB" -A -t "C,," -n "$CERT_NICKNAME" -i "$CERT_FILE"
+  echo "[+] Certificate installed in Chrome's (NSS) trust store for $REAL_USER."
+  echo "[*] Restart Chrome/Chromium for it to pick up the new CA."
+else
+  echo "[!] certutil missing — Chrome will not trust the cert."
+fi
+
+echo "[*] Downloading latest config..."
+if [[ -f "$CONFIG_FILE" ]]; then
+  read -rp "[?] Config already exists at $CONFIG_FILE. Update it? (Y/n): " ans
+  if [[ "$ans" != n && "$ans" != N ]]; then
+    wget -qO "$CONFIG_FILE" "$CONFIG_URL"
+    echo "[+] Saved config to $CONFIG_FILE"
+  else
+    echo "[*] Keeping existing config."
+  fi
+else
+  read -rp "[?] Download config from upstream? (Y/n): " ans
+  if [[ "$ans" == n || "$ans" == N ]]; then echo "[!] Config is required. Aborting."; exit 1; fi
+  wget -qO "$CONFIG_FILE" "$CONFIG_URL"
+  echo "[+] Saved config to $CONFIG_FILE"
+fi
+
+# xray resolves relative cert paths against the binary's directory, not the
+# working dir, so rewrite the config's "mycert.crt"/"mycert.key" to absolute
+# paths. Idempotent: after the first pass the bare filenames are gone.
+sed -i -e "s#\"mycert.crt\"#\"$CERT_FILE\"#g" -e "s#\"mycert.key\"#\"$KEY_FILE\"#g" "$CONFIG_FILE"
+
+# Capture the current default route. root's own traffic (xray's outbound to the
+# fronting servers) is sent here so it bypasses the TUN instead of looping back.
+orig_gw="$(ip route show default | awk '/^default/ {print $3; exit}')"
+orig_if="$(ip route show default | awk '/^default/ {print $5; exit}')"
+if [[ -z "$orig_gw" || -z "$orig_if" ]]; then echo "[!] Could not determine the current default route."; exit 1; fi
+
+echo "[*] Starting xray (mixed SOCKS/HTTP on $SOCKS_ADDR)..."
+# Run from the state dir so geo/asset files resolve. Background so cleanup fires.
+( cd "$STATE_DIR" && XRAY_LOCATION_ASSET="$STATE_DIR" exec "$XRAY_BIN" run -c "$CONFIG_NAME" ) &
+XRAY_PID=$!
+
+echo "[*] Creating TUN device $TUN_DEV..."
+ip tuntap add mode tun dev "$TUN_DEV"
+ip addr add "$TUN_ADDR4" dev "$TUN_DEV"
+ip link set dev "$TUN_DEV" up
+
+echo "[*] Starting tun2socks..."
+"$TUN2SOCKS_BIN" -device "tun://$TUN_DEV" -proxy "socks5://$SOCKS_ADDR" &
+TUN2SOCKS_PID=$!
+
+echo "[*] Installing routes..."
+# root (uid 0 = xray/tun2socks) bypasses the TUN via its own table; everything
+# else's default goes into the TUN.
+ip route add default via "$orig_gw" dev "$orig_if" table "$PHYS_TABLE"
+ip rule add uidrange 0-0 lookup "$PHYS_TABLE" pref "$RULE_PREF"
+ip route add default dev "$TUN_DEV" metric 1
+ROUTES_UP=1
+
+# The config only MITMs TCP/443. Under a TUN, browsers otherwise use QUIC
+# (HTTP/3 over UDP/443), which bypasses the MITM and fails. Reject QUIC for
+# non-root apps so they fall back to TCP TLS. (uid 0 = xray is unaffected.)
+echo "[*] Blocking QUIC (UDP/443) so traffic falls back to TCP..."
+iptables -I OUTPUT -p udp --dport 443 -m owner ! --uid-owner 0 -j REJECT
+ip6tables -I OUTPUT -p udp --dport 443 -m owner ! --uid-owner 0 -j REJECT 2>/dev/null || true
+QUIC_BLOCKED=1
+
+# No IPv6 routing is set up for the TUN, so reject non-root global IPv6 to
+# prevent leaks around the tunnel (forces IPv4, which is tunneled).
+ip6tables -I OUTPUT -d 2000::/3 -m owner ! --uid-owner 0 -j REJECT 2>/dev/null && V6_BLOCKED=1 || true
+
+echo "[+] System VPN is up — all non-root traffic goes through MITM-DomainFronting."
+echo "[*] Press Ctrl-C to stop (everything is cleaned up)."
+wait "$XRAY_PID"

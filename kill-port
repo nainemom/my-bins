@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+PORT="$1"
+
+if [ -z "$PORT" ]; then
+  echo "[!] usage: $0 <port>"
+  exit 1
+fi
+
+PID=$(lsof -ti tcp:"$PORT")
+
+if [ -z "$PID" ]; then
+  echo "[!] no process is listening on port $PORT"
+  exit 1
+fi
+
+kill -9 $PID
+
+echo "[+] done! process $PID has been killed!"

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -e
+
+# Detect CPU vendor
+CPU_VENDOR=$(grep -m1 '^vendor_id' /proc/cpuinfo | awk '{print $3}')
+
+# Relevant modules
+MOD_MAIN="kvm"
+if [[ "$CPU_VENDOR" == "GenuineIntel" ]]; then
+    MOD_CPU="kvm_intel"
+else
+    MOD_CPU="kvm_amd"
+fi
+
+
+status() {
+    lsmod | grep -q "^$MOD_MAIN";
+}
+
+load() {
+    echo "[*] kvm is currently not loaded; loading it..."
+    sudo modprobe "$MOD_MAIN"
+    sudo modprobe "$MOD_CPU"
+    echo "[+] kvm loaded."
+}
+
+unload() {
+    echo "[*] kvm is currently loaded; unloading it..."
+    sudo modprobe -r "$MOD_CPU" || echo "[!] could not remove $MOD_CPU (maybe not loaded)"
+    sudo modprobe -r "$MOD_MAIN" || echo "[!] could not remove $MOD_MAIN"
+    echo "[+] kvm unloaded."
+}
+
+case "$1" in
+    status)
+        if status; then
+            echo "[+] loaded"
+        else
+            echo "[+] unloaded"
+        fi
+        ;;
+    toggle)
+        if status; then
+            unload
+        else
+            load
+        fi
+        ;;
+    load)
+        load
+        ;;
+    unload)
+        unload
+        ;;
+    *)
+        echo "[!] usage: $0 <load|unload|toggle|status>"
+        exit 1
+        ;;
+esac

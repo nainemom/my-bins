@@ -6,12 +6,7 @@ if [ $EUID -ne 0 ]; then
   exit 1
 fi
 
-USERNAME="$1"
-
-if [ -z $USERNAME ]; then
-  echo "[!] usage: $0 <username>"
-  exit 1
-fi
+REAL_USER="${SUDO_USER:-$USER}"
 
 if [[ -z $(command -v sudo) ]] ; then
   echo "[*] installing sudo..."
@@ -19,8 +14,8 @@ if [[ -z $(command -v sudo) ]] ; then
   echo "[+] sudo package installed..."
 fi
 
-adduser $USERNAME sudo
-echo "[+] $USERNAME succesfully added to sudo group."
+adduser $REAL_USER sudo
+echo "[+] $REAL_USER succesfully added to sudo group."
 
 read -rp "[?] reboot now? (y/N): " reboot
 if [ "$reboot" = "y" ]; then

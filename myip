@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+
+if ! command -v jq &> /dev/null; then
+  echo "jq is not installed. aborting."
+  exit 1
+fi
+
+hostname=$(hostname)
+local_ipv4=$(hostname -I | awk '{print $1}')
+local_ipv6=$(ip -6 addr show | grep 'inet6' | awk '{print $2}' | grep -v '^::1/' | head -n 1)
+router_ip=$(ip route | grep default | awk '{print $3}')
+dns_server=$(grep nameserver /etc/resolv.conf | cut -d ' ' -f 2)
+
+printf "%-18s %s\n" "Hostname" ": $hostname"
+printf "%-18s %s\n" "Local IPv4 Address" ": $local_ipv4"
+printf "%-18s %s\n" "Local IPv6 Address" ": $local_ipv6"
+printf "%-18s %s\n" "Router IP Address" ": $router_ip"
+printf "%-18s %s\n" "DNS Server" ": $dns_server"
+
+public_ip_info=$(curl -s http://ip-api.com/json)
+public_ip=$(echo "$public_ip_info" | jq -r '.query')
+city=$(echo "$public_ip_info" | jq -r '.city')
+region=$(echo "$public_ip_info" | jq -r '.regionName')
+country=$(echo "$public_ip_info" | jq -r '.country')
+lat=$(echo "$public_ip_info" | jq -r '.lat')
+lon=$(echo "$public_ip_info" | jq -r '.lon')
+isp=$(echo "$public_ip_info" | jq -r '.isp')
+
+printf "%-18s %s\n" "IP Address" ": $public_ip"
+printf "%-18s %s\n" "ISP" ": $isp"
+printf "%-18s %s\n" "City" ": $city"
+printf "%-18s %s\n" "Region" ": $region"
+printf "%-18s %s\n" "Country" ": $country"
+printf "%-18s %s\n" "Coordinates" ": $lat, $lon"

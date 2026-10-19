@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -e
+
+if [ $EUID -ne 0 ]; then
+  echo "[!] run as root."
+  exit 1
+fi
+
+REAL_USER="${SUDO_USER:-$USER}"
+
+if [[ ! -f /etc/debian_version ]]; then
+  echo "[!] this script only supports debian."
+  exit 1
+fi
+
+echo "[*] removing conflicting packages..."
+for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
+  apt remove -y $pkg 2>/dev/null || true
+done
+
+echo "[*] installing prerequisites..."
+apt update
+apt install -y ca-certificates curl
+
+echo "[*] adding docker apt repository..."
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $CODENAME stable" \
+  > /etc/apt/sources.list.d/docker.list
+
+echo "[*] installing docker..."
+apt update
+apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+echo "[+] docker installed."
+
+if [[ -z $(command -v docker-compose) ]] ; then
+  cat > /usr/local/bin/docker-compose <<'EOF'
+#!/usr/bin/env bash
+exec docker compose "$@"
+EOF
+  chmod +x /usr/local/bin/docker-compose
+  echo "[+] docker-compose shim installed."
+fi
+
+systemctl enable --now docker containerd
+echo "[+] docker service enabled and started."
+
+if [ "$REAL_USER" != "root" ]; then
+  usermod -aG docker $REAL_USER
+  echo "[+] $REAL_USER succesfully added to docker group."
+fi
+
+docker --version
+docker compose version
+
+read -rp "[?] reboot now? (y/N): " reboot
+if [ "$reboot" = "y" ]; then
+  systemctl reboot
+fi

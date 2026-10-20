@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -e
+
+if [ $EUID -ne 0 ]; then
+  echo "Run as root"
+  exit 1
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+echo "Fetching latest release info..."
+URL="$(curl -sL "https://www.win-rar.com/download.html?&L=0" | grep -o 'https://www.win-rar.com/fileadmin/winrar-versions/rarlinux-x64-[0-9]*\.tar\.gz' | head -n1)"
+VERSION="$(echo "$URL" | grep -o '[0-9]*\.tar\.gz' | sed -E 's/^([0-9])([0-9]+)\.tar\.gz$/\1.\2/')"
+
+echo "Fetching package..."
+curl -#Lo $TMP/rar.tar.gz "$URL"
+
+tar xzf $TMP/rar.tar.gz -C $TMP
+mkdir -p /usr/local/bin /usr/local/lib
+install -m 755 $TMP/rar/rar $TMP/rar/unrar /usr/local/bin
+install -m 644 $TMP/rar/rarfiles.lst /etc
+install -m 644 $TMP/rar/default.sfx /usr/local/lib
+
+echo "Done! RAR $VERSION installed!"

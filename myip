@@ -17,18 +17,23 @@ printf "%-18s %s\n" "Local IPv6 Address" ": $local_ipv6"
 printf "%-18s %s\n" "Router IP Address" ": $router_ip"
 printf "%-18s %s\n" "DNS Server" ": $dns_server"
 
-public_ip_info=$(curl -s http://ip-api.com/json)
-public_ip=$(echo "$public_ip_info" | jq -r '.query')
-city=$(echo "$public_ip_info" | jq -r '.city')
-region=$(echo "$public_ip_info" | jq -r '.regionName')
-country=$(echo "$public_ip_info" | jq -r '.country')
-lat=$(echo "$public_ip_info" | jq -r '.lat')
-lon=$(echo "$public_ip_info" | jq -r '.lon')
-isp=$(echo "$public_ip_info" | jq -r '.isp')
+ip_result=$(curl -s https://ipinfo.io/json)
+ip=$(echo "$ip_result" | jq -r '.ip')
+hostname=$(echo "$ip_result" | jq -r '.hostname')
+country=$(echo "$ip_result" | jq -r '.country')
+city=$(echo "$ip_result" | jq -r '.city')
+region=$(echo "$ip_result" | jq -r '.region')
+timezone=$(echo "$ip_result" | jq -r '.timezone')
+loc=$(echo "$ip_result" | jq -r '.loc')
+org=$(echo "$ip_result" | jq -r '.org')
+postal=$(echo "$ip_result" | jq -r '.postal')
 
-printf "%-18s %s\n" "IP Address" ": $public_ip"
-printf "%-18s %s\n" "ISP" ": $isp"
+printf "%-18s %s\n" "IP Address" ": $ip"
+printf "%-18s %s\n" "Hostname" ": $hostname"
+printf "%-18s %s\n" "Country" ": $country"
 printf "%-18s %s\n" "City" ": $city"
 printf "%-18s %s\n" "Region" ": $region"
-printf "%-18s %s\n" "Country" ": $country"
-printf "%-18s %s\n" "Coordinates" ": $lat, $lon"
+printf "%-18s %s\n" "Timezone" ": $timezone"
+printf "%-18s %s\n" "Coordinates" ": $loc"
+printf "%-18s %s\n" "Org" ": $org"
+printf "%-18s %s\n" "Postal Code" ": $postal"

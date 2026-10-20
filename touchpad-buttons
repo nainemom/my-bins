@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# disable/enable the physical buttons of the thinkpad touchpad & trackpoint.
+# pointer movement and tap-to-click keep working.
+#
+# how: libinput quirk (AttrEventCode) in /etc/libinput/local-overrides.quirks
+# that strips the button event codes from the internal devices. works on
+# wayland and x11, but needs a logout/login (or reboot) to take effect.
+#
+# usage: touchpad-buttons off|on|status|release
+
+QUIRKS_FILE="/etc/libinput/local-overrides.quirks"
+BEGIN_MARK="# >>> touchpad-buttons >>>"
+END_MARK="# <<< touchpad-buttons <<<"
+DEVICE_PATTERN='TrackPoint|SYNA.*(Mouse|Touchpad)'
+
+QUIRKS_BLOCK="$BEGIN_MARK
+[touchpad-buttons: trackpoint buttons]
+MatchName=*TrackPoint*
+AttrEventCode=-BTN_LEFT;-BTN_RIGHT;-BTN_MIDDLE
+
+[touchpad-buttons: synaptics mouse buttons]
+MatchName=SYNA*Mouse
+AttrEventCode=-BTN_LEFT;-BTN_RIGHT;-BTN_MIDDLE
+
+[touchpad-buttons: clickpad click]
+MatchName=SYNA*Touchpad
+AttrEventCode=-BTN_LEFT;-BTN_RIGHT;-BTN_MIDDLE
+AttrInputProp=-INPUT_PROP_BUTTONPAD
+$END_MARK"
+
+remove_block() {
+  [ -f "$QUIRKS_FILE" ] || return 0
+  sudo sed -i "/^$BEGIN_MARK\$/,/^$END_MARK\$/d" "$QUIRKS_FILE"
+  # drop the file if nothing else is left in it
+  if ! grep -q '[^[:space:]]' "$QUIRKS_FILE"; then
+    sudo rm -f "$QUIRKS_FILE"
+  fi
+}
+
+is_disabled() {
+  [ -f "$QUIRKS_FILE" ] && grep -qF "$BEGIN_MARK" "$QUIRKS_FILE"
+}
+
+# inhibit + uninhibit the devices: the kernel releases every held button,
+# which un-sticks a click that never got released.
+release_buttons() {
+  for dev in /sys/class/input/input*; do
+    grep -qE "$DEVICE_PATTERN" "$dev/name" 2>/dev/null || continue
+    [ -f "$dev/inhibited" ] || continue
+    echo 1 | sudo tee "$dev/inhibited" > /dev/null
+    echo 0 | sudo tee "$dev/inhibited" > /dev/null
+    echo "[+] released buttons of: $(cat "$dev/name")"
+  done
+}
+
+case "$1" in
+  off)
+    remove_block
+    sudo mkdir -p "$(dirname "$QUIRKS_FILE")"
+    echo "$QUIRKS_BLOCK" | sudo tee -a "$QUIRKS_FILE" > /dev/null
+    release_buttons
+    gsettings set org.gnome.desktop.peripherals.touchpad tap-to-click true 2>/dev/null
+    echo "[+] done! internal buttons disabled (tap-to-click is on)."
+    echo "[!] log out and back in (or reboot) to apply."
+    ;;
+  on)
+    if ! is_disabled; then
+      echo "[!] buttons are not disabled by this script"
+      exit 0
+    fi
+    remove_block
+    echo "[+] done! internal buttons restored."
+    echo "[!] log out and back in (or reboot) to apply."
+    ;;
+  status)
+    if is_disabled; then
+      echo "[+] internal buttons: disabled (in $QUIRKS_FILE)"
+    else
+      echo "[+] internal buttons: enabled"
+    fi
+    ;;
+  release)
+    release_buttons
+    ;;
+  *)
+    echo "[!] usage: $0 off|on|status|release"
+    echo "    off      disable internal touchpad/trackpoint buttons"
+    echo "    on       restore them"
+    echo "    status   show current state"
+    echo "    release  un-stick a click that is held down right now"
+    exit 1
+    ;;
+esac

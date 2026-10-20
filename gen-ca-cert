@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Generate a self-signed CA cert/key pair (same shape as `xray tls cert -ca`)
+# into the current directory: mycert.crt + mycert.key
+set -e
+
+DAYS="${DAYS:-3650}"
+CRT="mycert.crt"
+KEY="mycert.key"
+NAME="My Certificate"
+DEST="$(pwd)"
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_GROUP="$(id -gn "$REAL_USER")"
+
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "openssl not found"
+  exit 1
+fi
+
+if [[ -e "$DEST/$CRT" || -e "$DEST/$KEY" ]]; then
+  read -rp "$CRT/$KEY already exist in $DEST. Overwrite? [y/N]: " ans
+  [[ "$ans" == y || "$ans" == Y ]] || { echo "Aborted"; exit 1; }
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+openssl ecparam -name prime256v1 -genkey -noout -out "$TMP/$KEY"
+openssl req -x509 -new -sha256 -days "$DAYS" \
+  -key "$TMP/$KEY" -out "$TMP/$CRT" \
+  -subj "/O=$NAME/CN=$NAME" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign" \
+  -addext "extendedKeyUsage=serverAuth" \
+  -addext "subjectKeyIdentifier=hash"
+
+install -m 600 -o "$REAL_USER" -g "$REAL_GROUP" "$TMP/$KEY" "$DEST/$KEY"
+install -m 644 -o "$REAL_USER" -g "$REAL_GROUP" "$TMP/$CRT" "$DEST/$CRT"
+
+echo
+openssl x509 -in "$DEST/$CRT" -noout -subject -enddate -fingerprint -sha256
+echo "Done: $DEST/$CRT, $DEST/$KEY"

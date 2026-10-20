@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -e
+
+if [ $EUID -eq 0 ]; then
+  echo "Run as your normal user (installs into your home directory)"
+  exit 1
+fi
+
+echo "Running official installer..."
+curl -fsSL https://claude.ai/install.sh | bash
+
+echo "Done! Claude Code installed!"

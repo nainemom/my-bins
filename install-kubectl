@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -e
+
+if [ $EUID -ne 0 ]; then
+  echo "Run as root"
+  exit 1
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+VERSION="$(curl -sL https://dl.k8s.io/release/stable.txt)"
+
+echo "Fetching package..."
+curl -#Lo $TMP/kubectl "https://dl.k8s.io/release/$VERSION/bin/linux/amd64/kubectl"
+
+install -o root -g root -m 0755 $TMP/kubectl /usr/local/bin/kubectl
+
+echo "Done! Kubectl $VERSION installed!"

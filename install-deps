@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -e
+
+if [ $EUID -ne 0 ]; then
+  echo "[!] run as root."
+  exit 1
+fi
+
+REAL_USER="${SUDO_USER:-$USER}"
+
+apt install -y apt-transport-https ca-certificates curl wget gnupg git jq

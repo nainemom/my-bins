@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -e
+
+if [ $EUID -ne 0 ]; then
+  echo "Run as root"
+  exit 1
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+echo "Fetching package..."
+curl -#Lo $TMP/happ.deb "https://github.com/Happ-proxy/happ-desktop/releases/latest/download/Happ.linux.x64.deb"
+
+apt install -y $TMP/happ.deb
+
+echo "Done! Happ installed!"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -e
+
+if [ $EUID -ne 0 ]; then
+  echo "Run as root"
+  exit 1
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+echo "Fetching latest release info..."
+RELEASE="$(curl -s "https://api.github.com/repos/getsops/sops/releases/latest")"
+URL="$(echo "$RELEASE" | grep -o '"browser_download_url": *"[^"]*_amd64\.deb"' | cut -d'"' -f4)"
+VERSION="$(echo "$RELEASE" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"
+
+echo "Fetching package..."
+curl -#Lo $TMP/sops.deb "$URL"
+
+apt install -y $TMP/sops.deb
+
+echo "Done! Sops $VERSION installed!"
